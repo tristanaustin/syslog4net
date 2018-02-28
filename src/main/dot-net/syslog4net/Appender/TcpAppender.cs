@@ -1,4 +1,4 @@
-﻿#region Apache License
+#region Apache License
 //
 // Licensed to the Apache Software Foundation (ASF) under one or more 
 // contributor license agreements. See the NOTICE file distributed with
@@ -19,8 +19,12 @@
 
 using System;
 using System.Globalization;
+using System.IO;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using log4net.Appender;
@@ -137,7 +141,7 @@ namespace syslog4net.Appender
         /// the underlying <see cref="TcpClient" /> should sent the logging event.
         /// </summary>
         /// <value>
-        /// The IP address of the remote host  to which the logging event will be sent.
+        /// The IP address or host name of the remote host to which the logging event will be sent.
         /// </value>
         /// <remarks>
         /// <para>
@@ -198,7 +202,7 @@ namespace syslog4net.Appender
         /// of the local network.
         /// </para>
         /// </remarks>
-        public IPAddress RemoteAddress
+        public string RemoteAddress
         {
             get { return this._remoteAddress; }
             set { this._remoteAddress = value; }
@@ -255,6 +259,15 @@ namespace syslog4net.Appender
             set { this._encoding = value; }
         }
 
+        /// <summary>
+        /// Gets or sets the flag indicating whether the connection should be established via TLS. Defaults to false.
+        /// </summary>
+        public bool IsTlsRequired
+        {
+            get { return this._isTlsRequired; }
+            set { this._isTlsRequired = value; }
+        }
+
         #endregion Public Instance Properties
 
         #region Implementation of IOptionHandler
@@ -289,7 +302,7 @@ namespace syslog4net.Appender
             {
                 throw new ArgumentNullException("RemoteAddress");
             }
-            
+
             if (this.RemotePort < IPEndPoint.MinPort || this.RemotePort > IPEndPoint.MaxPort)
             {
                 throw log4net.Util.SystemInfo.CreateArgumentOutOfRangeException("RemotePort", this.RemotePort,
@@ -323,16 +336,31 @@ namespace syslog4net.Appender
             {
                 TcpClient client = new TcpClient();
 
-                //Async Programming Model allows socket connection to happen on threadpool so app can continue.
-                client.BeginConnect(
-                    this.RemoteAddress,
-                    this.RemotePort,
-                    this.ConnectionEstablishedCallback,
-                    new AsyncLoggingData()
-                    {
-                        Client = client,
-                        LoggingEvent = loggingEvent
-                    });
+                try
+                {
+                    //Do the lookup to ensure there is a resolvable hostname
+                    IPHostEntry hostEntry = Dns.GetHostEntry(this.RemoteAddress);
+
+                    //Async Programming Model allows socket connection to happen on threadpool so app can continue.
+                    client.BeginConnect(hostEntry.HostName, this.RemotePort, this.ConnectionEstablishedCallback,
+                        new AsyncLoggingData()
+                        {
+                            Client = client,
+                            LoggingEvent = loggingEvent
+                        });
+                } catch (Exception)
+                {
+                    //Ignore the hostname resolution failure and assume it is an IP address
+                    IPAddress ipAddress = IPAddress.Parse(this._remoteAddress);
+
+                    //Async Programming Model allows socket connection to happen on threadpool so app can continue.
+                    client.BeginConnect(ipAddress, this.RemotePort, this.ConnectionEstablishedCallback,
+                        new AsyncLoggingData()
+                        {
+                            Client = client,
+                            LoggingEvent = loggingEvent
+                        });
+                }
             }
             catch (Exception ex)
             {
@@ -371,9 +399,20 @@ namespace syslog4net.Appender
 
             try
             {
-                using (var netStream = loggingData.Client.GetStream())
+                if (this._isTlsRequired)
                 {
-                    netStream.Write(buffer, 0, buffer.Length);
+                    using (SslStream sslStream = new SslStream(loggingData.Client.GetStream()))
+                    {
+                        sslStream.AuthenticateAsClient(this._remoteAddress, null, SslProtocols.Default, true);
+                        sslStream.Write(buffer, 0, buffer.Length);
+                    }
+                }
+                else
+                {
+                    using (Stream netStream = loggingData.Client.GetStream())
+                    {
+                        netStream.Write(buffer, 0, buffer.Length);
+                    }
                 }
             }
             catch (Exception ex)
@@ -422,10 +461,10 @@ namespace syslog4net.Appender
         #region Private Instance Fields
 
         /// <summary>
-        /// The IP address of the remote host or multicast group to which 
+        /// The IP address or host name of the remote host or multicast group to which 
         /// the logging event will be sent.
         /// </summary>
-        private IPAddress _remoteAddress;
+        private string _remoteAddress;
 
         /// <summary>
         /// The TCP port number of the remote host or multicast group to 
@@ -437,6 +476,11 @@ namespace syslog4net.Appender
         /// The encoding to use for the packet.
         /// </summary>
         private Encoding _encoding = Encoding.Default;
+
+        /// <summary>
+        /// The flag indicating whether the connection should be established via TLS
+        /// </summary>
+        private bool _isTlsRequired = false;
 
         #endregion Private Instance Fields
     }
